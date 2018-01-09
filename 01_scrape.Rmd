@@ -1,0 +1,201 @@
+---
+title: "Scrape data from On the snow"
+author: "Duc-Quang Nguyen | swissinfo.ch"
+date: " 2017"
+output: 
+  html_document:
+    code_folding: show
+    echo: TRUE
+    warning: FALSE
+    message: FALSE
+    toc: yes
+    toc_depth: 3
+    theme: simplex
+---
+
+## Inspirations
+
+* [Economist Where to ski?](https://www.1843magazine.com/data-graphic/what-the-numbers-say/where-to-ski?utm_content=buffer0ea72&utm_medium=social&utm_source=twitter.com&utm_campaign=buffer)
+
+* [Skier png](https://upload.wikimedia.org/wikipedia/commons/thumb/b/b8/Hiihtohissi_745_tunnusosa.svg/2000px-Hiihtohissi_745_tunnusosa.svg.png)
+
+
+d3-scatterplot-cont {background: url(https://upload.wikimedia.org/wikipedia/commons/thumb/b/b8/Hiihtohissi_745_tunnusosa.svg/2000px-Hiihtohissi_745_tunnusosa.svg.png) center; background-size: auto auto; background-size: cover;}
+
+## Data fix
+
+* [DIEMTIGTAL - WIRIEHORN](https://www.onthesnow.co.uk/bernese-oberland/diemtigtal-wiriehorn/ski-resort.html)
+  * [](https://fr.wikipedia.org/wiki/Wiriehorn)
+  * [](http://cdn.myswitzerland.com/wispo_images/karten/529_KARTE.jpg)
+* [Portes du soleil](http://www.portesdusoleil.com/hiver.html)
+
+
+
+```{r setup, include=FALSE}
+scrapeData <- F
+cleanOutput <- F
+
+require(lintr)
+library(tidyverse)
+library(magrittr)
+library(stringr)
+library(knitr)
+library(countrycode)
+library(swiMap)
+library(swiTheme)
+
+### Getting data in packages
+library(rvest)
+```
+
+
+```{r scrape, warning=F}
+if(scrapeData) {
+  prefix.url <- 'https://www.onthesnow.co.uk'
+  
+  base.url <- "https://www.onthesnow.co.uk/switzerland/ski-resorts.html"
+  html.read <- read_html(base.url)
+  links <- html.read %>% html_nodes(".a") %>% 
+    str_extract("href.*.html") %>%
+    str_sub(7)
+  
+  # discard links with switzerland, which are general page and not ski resort pages
+  links <- links[!str_detect(links, "^\\/switzerland")]
+  
+  data <- map_dfr(links, function(suffix) {
+    cat("\n", suffix)
+    
+    link <- str_c(prefix.url, suffix)
+    html.r <- read_html(link)
+
+    resortName <- str_replace(suffix, ".*\\/(.*)\\/.*.html", "\\1")
+    
+    resortName <- html.r %>% 
+      html_node(".resort_name") %>% html_text()
+    region <- str_replace(suffix, "^\\/(.*)\\/.*\\/.*", "\\1")
+        
+    # parse #resort_terrain
+    terrains.r <- html.r %>% 
+      html_nodes("#resort_terrain li p") %>% 
+      html_text()
+    
+    terrains.colnames <- c("Beginner Runs", "Intermediate Runs", "Advanced Runs", "Expert Runs", "Runs", "KM Pistes", "Terrain Parks", "Skiable Terrain", "Snow Making")
+    terrains <- str_extract_all(terrains.r[seq(2, 16, 2)], "^\\d+" ) %>% 
+      unlist() %>% as.numeric()
+    terrains.names <- terrains.r[seq(1, 15, 2)]
+    terrains <- set_names(terrains, terrains.names) %>% 
+      na.exclude() 
+    terrains <- terrains[terrains.colnames]
+    names(terrains) <- terrains.colnames
+    terrains[which(is.na(terrains))] <- 0
+
+    # parse other module
+    terrains.r <- html.r %>% 
+      html_nodes(".module tr td") %>% html_text()
+    
+    # get the altitudes, # lifts and max ski pass price 
+    terrains2 <- str_split_fixed(terrains.r[2], " \\- ", 2) %>% 
+      as.vector() %>% 
+      str_extract_all("^\\d+") %>%
+      unlist() %>% as.numeric()
+    
+    terrains2 <- c(terrains2, terrains.r[4] %>% as.numeric())
+    
+    terrains2 <- c(terrains2, 
+                   str_extract_all(terrains.r[5], "(\\d+\\.\\d+)Complete.*") %>%
+                     str_extract("(\\d+\\.\\d+)") %>% as.numeric()
+    ) %>%
+      set_names(c("base_alt", "summit_alt", "lifts", "skiPass_max"))
+    
+    result <- as.data.frame(cbind(
+      name = resortName, 
+      region = region,
+      as.data.frame(t(as.data.frame( c(terrains, terrains2))))
+    ) )  
+    rownames(result) <- NULL
+    stopifnot(ncol(result) == 15)
+    
+    result
+  })  
+  
+  write_csv(data, "input/onthesnow_CH.csv")
+} else {
+  data <- read_csv("input/onthesnow_CH.csv")
+}
+
+########### hack for Portes du soleil & DIEMTIGTAL - WIRIEHORN
+
+
+#data %>% filter(name %in% c("Champéry", "Morgins", "Torgon", "Les Crosets"))
+data %<>% filter(!name %in% c("Champéry", "Torgon", "Les Crosets"))
+# https://fr.wikipedia.org/wiki/Portes_du_Soleil
+data[data$name == "Morgins", c('name')] <- "Portes du Soleil"
+data[data$name == "Morgins", c('base_alt', 'summit_alt', 'lifts')] <-  c(900, 2254, 196)
+
+
+# https://fr.wikipedia.org/wiki/Wiriehorn
+data[data$name == "Diemtigtal - Wiriehorn", c('base_alt', 'summit_alt')] <- c(1002, 1860)
+
+```
+
+```{r explore}
+## lump/drop the most uncommon regions
+# data %>% count(region)
+data %<>%
+  mutate(
+    reg = fct_lump(region, n = 3),
+    name = toupper(name))
+
+cor.test(data$skiPass_max, data$summit_alt)
+cor.test(data$skiPass_max, data$`KM Pistes`)
+
+
+ggplot(data, aes(x = skiPass_max, y = summit_alt, size =`KM Pistes`)) + 
+  geom_point(aes(group = reg, colour = reg)) + swi_theme() +
+  scale_size_continuous(range = c(.1, 10)) + 
+  labs(title = "Ski day pass vs summit altitude", subtitle = "Scaled by total slope length")
+
+
+ggplot(data, aes(x = skiPass_max, y = `KM Pistes`, size = summit_alt)) + 
+  geom_point(aes(group = reg, colour = reg)) + 
+  swi_theme() +
+  scale_size_continuous(range = c(.1, 10)) + 
+  labs(title = "Ski day pass vs total slope length", subtitle = "Scaled by summit altitude")
+
+tmp <- data %>%
+  mutate(chfByKm = `KM Pistes` / skiPass_max)
+
+qplot(tmp$chfByKm, binwdith = 1)
+tmp %>% filter(chfByKm <= quantile(tmp$chfByKm, 0.05) | chfByKm >= quantile(tmp$chfByKm, 0.95))
+```
+
+```{r DW export}
+data %>% 
+  select(-`Terrain Parks`, -`Skiable Terrain`, -`Snow Making`) %>%
+  write_csv("input/dw_export_rts.csv")
+
+```
+
+
+```{r move production graphics}
+if(cleanOutput) {
+  files <- c("basename_.*html", "js")
+
+  if(!dir.exists("output/bak")) {
+    dir.create("output/bak")
+  } else {
+    list.files("output/bak/", full.names = T, recursive = T) %>% file.remove()
+  }
+  ori.files <- list.files("output", full.names = T)[list.files("output") != "bak"]
+  file.copy(ori.files, to = "output/bak/", recursive = T)
+  unlink(ori.files, recursive = T)
+
+  files_tomove <- lapply(files, function(x) list.files(pattern = x)) %>% unlist()
+  file.copy(files_tomove, "output", recursive = T)
+  unlink(files_tomove, recursive = T)
+}
+```
+
+```{r linting}
+lintr::lint(knitr::current_input())
+```
